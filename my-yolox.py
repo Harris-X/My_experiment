@@ -307,20 +307,20 @@ def bboxes_iou(bboxes_a, bboxes_b, xyxy=True):
         br = torch.min(bboxes_a[:, None, 2:], bboxes_b[:, 2:])
         area_a = torch.prod(bboxes_a[:, 2:] - bboxes_a[:, :2], 1)
         area_b = torch.prod(bboxes_b[:, 2:] - bboxes_b[:, :2], 1)
-    else:
+    else:  # 计算中心点坐标
         tl = torch.max(
-            (bboxes_a[:, None, :2] - bboxes_a[:, None, 2:] / 2),
-            (bboxes_b[:, :2] - bboxes_b[:, 2:] / 2),
+            (bboxes_a[:, None, :2] - bboxes_a[:, None, 2:] / 2),  # 真实框的左上角，追加一个维度，None->跨维比较
+            (bboxes_b[:, :2] - bboxes_b[:, 2:] / 2),  # 预测框的左上角
         )
         br = torch.min(
-            (bboxes_a[:, None, :2] + bboxes_a[:, None, 2:] / 2),
-            (bboxes_b[:, :2] + bboxes_b[:, 2:] / 2),
+            (bboxes_a[:, None, :2] + bboxes_a[:, None, 2:] / 2),  # 真实框的右下角，追加一个维度
+            (bboxes_b[:, :2] + bboxes_b[:, 2:] / 2),  # 预测框的右下角
         )
 
-        area_a = torch.prod(bboxes_a[:, 2:], 1)
+        area_a = torch.prod(bboxes_a[:, 2:], 1)  # 后两维相乘
         area_b = torch.prod(bboxes_b[:, 2:], 1)
-    en = (tl < br).type(tl.type()).prod(dim=2)
-    area_i = torch.prod(br - tl, 2) * en  # * ((tl < br).all())
+    en = (tl < br).type(tl.type()).prod(dim=2)  # 第二维相乘，tl<br->交集
+    area_i = torch.prod(br - tl, 2) * en  # * ((tl < br).all()) #求交集面积
     return area_i / (area_a[:, None] + area_b - area_i)
 
 
@@ -887,7 +887,7 @@ class YOLOXHead(nn.Module):
         pair_wise_ious = bboxes_iou(gt_bboxes_per_image, bboxes_preds_per_image, False)
 
         gt_cls_per_image = (
-            F.one_hot(gt_classes.to(torch.int64), self.num_classes)
+            F.one_hot(gt_classes.to(torch.int64), self.num_classes)  # one-hot编码
                 .float()
                 .unsqueeze(1)
                 .repeat(1, num_in_boxes_anchor, 1)
@@ -902,14 +902,14 @@ class YOLOXHead(nn.Module):
                     cls_preds_.float().unsqueeze(0).repeat(num_gt, 1, 1).sigmoid_()
                     * obj_preds_.float().unsqueeze(0).repeat(num_gt, 1, 1).sigmoid_()
             )
-            pair_wise_cls_loss = F.binary_cross_entropy(
+            pair_wise_cls_loss = F.binary_cross_entropy(  # 二分类交叉损失熵
                 cls_preds_.sqrt_(), gt_cls_per_image, reduction="none"
             ).sum(-1)
         del cls_preds_
 
         cost = (
-                pair_wise_cls_loss
-                + 3.0 * pair_wise_ious_loss
+                pair_wise_cls_loss  # 分类损失
+                + 3.0 * pair_wise_ious_loss  # iou损失
                 + 100000.0 * (~is_in_boxes_and_center)
         )
 
@@ -988,7 +988,7 @@ class YOLOXHead(nn.Module):
         is_in_boxes = bbox_deltas.min(dim=-1).values > 0.0  # bbox_deltas->[num_gt:真实框数,8400：3种规格的总格子数]
         is_in_boxes_all = is_in_boxes.sum(dim=0) > 0  # 计算总共的在真实框内数目
         # in fixed center
-
+        #  取真实框的中心为中心：格子边长的5倍为边长的正方形
         center_radius = 2.5
 
         gt_bboxes_per_image_l = (gt_bboxes_per_image[:, 0]).unsqueeze(1).repeat(
@@ -1003,7 +1003,7 @@ class YOLOXHead(nn.Module):
         gt_bboxes_per_image_b = (gt_bboxes_per_image[:, 1]).unsqueeze(1).repeat(
             1, total_num_anchors
         ) + center_radius * expanded_strides_per_image.unsqueeze(0)
-
+        # 判断8400个框的中心点有哪些在这个取的正方形内
         c_l = x_centers_per_image - gt_bboxes_per_image_l
         c_r = gt_bboxes_per_image_r - x_centers_per_image
         c_t = y_centers_per_image - gt_bboxes_per_image_t
@@ -1013,11 +1013,11 @@ class YOLOXHead(nn.Module):
         is_in_centers_all = is_in_centers.sum(dim=0) > 0
 
         # in boxes and in centers
-        is_in_boxes_anchor = is_in_boxes_all | is_in_centers_all
+        is_in_boxes_anchor = is_in_boxes_all | is_in_centers_all  # 两者并集：即为gt_box和所取的正方形box
 
         is_in_boxes_and_center = (
                 is_in_boxes[:, is_in_boxes_anchor] & is_in_centers[:, is_in_boxes_anchor]
-        )
+        )  # 取即在gt_box又在所取的正方形box中的预测为正的样本
         return is_in_boxes_anchor, is_in_boxes_and_center
 
     def dynamic_k_matching(self, cost, pair_wise_ious, gt_classes, num_gt, fg_mask):
