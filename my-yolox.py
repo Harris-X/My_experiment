@@ -840,18 +840,18 @@ class YOLOXHead(nn.Module):
     @torch.no_grad()
     def get_assignments(
             self,
-            batch_idx,
-            num_gt,
-            total_num_anchors,
+            batch_idx,  # 每次取batch中的一张图片的idx
+            num_gt,  # 真实框（gt）
+            total_num_anchors,  # 预测框8400个
             gt_bboxes_per_image,
             gt_classes,
-            bboxes_preds_per_image,
+            bboxes_preds_per_image,  # 8400个预测框
             expanded_strides,
             x_shifts,
             y_shifts,
-            cls_preds,
+            cls_preds,  # 8400个分类
             bbox_preds,
-            obj_preds,
+            obj_preds,  # 8400个置信度
             labels,
             imgs,
             mode="gpu",
@@ -946,18 +946,18 @@ class YOLOXHead(nn.Module):
     ):
         expanded_strides_per_image = expanded_strides[0]
         x_shifts_per_image = x_shifts[0] * expanded_strides_per_image
-        y_shifts_per_image = y_shifts[0] * expanded_strides_per_image
+        y_shifts_per_image = y_shifts[0] * expanded_strides_per_image  # 左上角坐标
         x_centers_per_image = (
-            (x_shifts_per_image + 0.5 * expanded_strides_per_image)
+            (x_shifts_per_image + 0.5 * expanded_strides_per_image)  # 每个格子中心坐标
                 .unsqueeze(0)
-                .repeat(num_gt, 1)
+                .repeat(num_gt, 1)  # 复制num_gt个进行预测框比较
         )  # [n_anchor] -> [n_gt, n_anchor]
         y_centers_per_image = (
             (y_shifts_per_image + 0.5 * expanded_strides_per_image)
                 .unsqueeze(0)
                 .repeat(num_gt, 1)
         )
-
+        # 计算真实框的四边，计算左上角，右下角坐标
         gt_bboxes_per_image_l = (
             (gt_bboxes_per_image[:, 0] - 0.5 * gt_bboxes_per_image[:, 2])
                 .unsqueeze(1)
@@ -967,7 +967,7 @@ class YOLOXHead(nn.Module):
             (gt_bboxes_per_image[:, 0] + 0.5 * gt_bboxes_per_image[:, 2])
                 .unsqueeze(1)
                 .repeat(1, total_num_anchors)
-        )
+        )  # 此处是中心点加上长和宽
         gt_bboxes_per_image_t = (
             (gt_bboxes_per_image[:, 1] - 0.5 * gt_bboxes_per_image[:, 3])
                 .unsqueeze(1)
@@ -985,8 +985,8 @@ class YOLOXHead(nn.Module):
         b_b = gt_bboxes_per_image_b - y_centers_per_image
         bbox_deltas = torch.stack([b_l, b_t, b_r, b_b], 2)
 
-        is_in_boxes = bbox_deltas.min(dim=-1).values > 0.0
-        is_in_boxes_all = is_in_boxes.sum(dim=0) > 0
+        is_in_boxes = bbox_deltas.min(dim=-1).values > 0.0  # bbox_deltas->[num_gt:真实框数,8400：3种规格的总格子数]
+        is_in_boxes_all = is_in_boxes.sum(dim=0) > 0  # 计算总共的在真实框内数目
         # in fixed center
 
         center_radius = 2.5
