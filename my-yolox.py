@@ -768,14 +768,14 @@ class YOLOXHead(nn.Module):
                         "cpu",
                     )
 
-                torch.cuda.empty_cache()
+                torch.cuda.empty_cache()  # 清除显存
                 num_fg += num_fg_img
 
-                cls_target = F.one_hot(
+                cls_target = F.one_hot(  # 得到总类别对应的iou
                     gt_matched_classes.to(torch.int64), self.num_classes
                 ) * pred_ious_this_matching.unsqueeze(-1)
-                obj_target = fg_mask.unsqueeze(-1)
-                reg_target = gt_bboxes_per_image[matched_gt_inds]
+                obj_target = fg_mask.unsqueeze(-1)  # 置信度：位置的可信度，所以用的掩码
+                reg_target = gt_bboxes_per_image[matched_gt_inds]  # 框的位置
                 if self.use_l1:
                     l1_target = self.get_l1_target(
                         outputs.new_zeros((num_fg_img, 4)),
@@ -791,7 +791,7 @@ class YOLOXHead(nn.Module):
             fg_masks.append(fg_mask)
             if self.use_l1:
                 l1_targets.append(l1_target)
-
+        # batch下的cat
         cls_targets = torch.cat(cls_targets, 0)
         reg_targets = torch.cat(reg_targets, 0)
         obj_targets = torch.cat(obj_targets, 0)
@@ -800,12 +800,13 @@ class YOLOXHead(nn.Module):
             l1_targets = torch.cat(l1_targets, 0)
 
         num_fg = max(num_fg, 1)
+        # 下面各种iou、obj、cls的损失计算
         loss_iou = (
                        self.iou_loss(bbox_preds.view(-1, 4)[fg_masks], reg_targets)
                    ).sum() / num_fg
         loss_obj = (
                        self.bcewithlog_loss(obj_preds.view(-1, 1), obj_targets)
-                   ).sum() / num_fg
+                   ).sum() / num_fg  # bcewithlog_loss：二元交叉熵损失，计算联系
         loss_cls = (
                        self.bcewithlog_loss(
                            cls_preds.view(-1, self.num_classes)[fg_masks], cls_targets
@@ -1021,37 +1022,42 @@ class YOLOXHead(nn.Module):
         return is_in_boxes_anchor, is_in_boxes_and_center
 
     def dynamic_k_matching(self, cost, pair_wise_ious, gt_classes, num_gt, fg_mask):
+        # cost:[gt_box,格子初步选择为正的样本数] 计算的是gt_box和筛选为正的样本格子之间cost损失
+        # pair_wise_ious：[gt_box,格子初步选择为正的样本数] 计算的是gt_box和筛选为正的样本格子之间iou损失
+        # gt_classes；[gt_box] gt_box个真实框对应的类别
+        # fg_mask: 掩码[8400,] 记录从8400个格子初步选择为正的样本的位置
         # Dynamic K
         # ---------------------------------------------------------------
         matching_matrix = torch.zeros_like(cost, dtype=torch.uint8)
 
         ious_in_boxes_matrix = pair_wise_ious
-        n_candidate_k = min(10, ious_in_boxes_matrix.size(1))
-        topk_ious, _ = torch.topk(ious_in_boxes_matrix, n_candidate_k, dim=1)
-        dynamic_ks = torch.clamp(topk_ious.sum(1).int(), min=1)
+        n_candidate_k = min(10, ious_in_boxes_matrix.size(1))  # 标签匹配，取多少个个iou来计算
+        topk_ious, _ = torch.topk(ious_in_boxes_matrix, n_candidate_k, dim=1)  # 从大到小的排序,选取不大于10个iou [gt_box,10]
+        dynamic_ks = torch.clamp(topk_ious.sum(1).int(),
+                                 min=1)  # 区间函数：保证每一个选取框至少有一个正样本，[gt_box,]:每个gt_box从8400格子中取出的10个中要选取的正样本个数
         dynamic_ks = dynamic_ks.tolist()
-        for gt_idx in range(num_gt):
+        for gt_idx in range(num_gt):  # 将cost中的上面计算的个数从小到大排列取出
             _, pos_idx = torch.topk(
                 cost[gt_idx], k=dynamic_ks[gt_idx], largest=False
             )
-            matching_matrix[gt_idx][pos_idx] = 1
+            matching_matrix[gt_idx][pos_idx] = 1  # matching_matrix:0矩阵对应的位置（正样本的位置）变为1
 
         del topk_ious, dynamic_ks, pos_idx
 
-        anchor_matching_gt = matching_matrix.sum(0)
+        anchor_matching_gt = matching_matrix.sum(0)  # 处理可能一个格子对应大于1的真实框的情况
         if (anchor_matching_gt > 1).sum() > 0:
             _, cost_argmin = torch.min(cost[:, anchor_matching_gt > 1], dim=0)
-            matching_matrix[:, anchor_matching_gt > 1] *= 0
-            matching_matrix[cost_argmin, anchor_matching_gt > 1] = 1
-        fg_mask_inboxes = matching_matrix.sum(0) > 0
-        num_fg = fg_mask_inboxes.sum().item()
+            matching_matrix[:, anchor_matching_gt > 1] *= 0  # 将大于1的格子值全部设置为0
+            matching_matrix[cost_argmin, anchor_matching_gt > 1] = 1  # 将异议的格子选择为cost最小的，并设置为1
+        fg_mask_inboxes = matching_matrix.sum(0) > 0  # 样本选择区间选择为正的样本设置为ture
+        num_fg = fg_mask_inboxes.sum().item()  # 得到新的正样本的个数
 
-        fg_mask[fg_mask.clone()] = fg_mask_inboxes
+        fg_mask[fg_mask.clone()] = fg_mask_inboxes  # 将新的正样本信息赋值
 
-        matched_gt_inds = matching_matrix[:, fg_mask_inboxes].argmax(0)
-        gt_matched_classes = gt_classes[matched_gt_inds]
+        matched_gt_inds = matching_matrix[:, fg_mask_inboxes].argmax(0)  # matched_gt_inds:[num_fg,] 每预测样本对应的真实框
+        gt_matched_classes = gt_classes[matched_gt_inds]  # 每个正样本对应的真实框的类别
 
-        pred_ious_this_matching = (matching_matrix * pair_wise_ious).sum(0)[
+        pred_ious_this_matching = (matching_matrix * pair_wise_ious).sum(0)[  # 每个正样本的真实框对应的iou
             fg_mask_inboxes
         ]
         return num_fg, gt_matched_classes, pred_ious_this_matching, matched_gt_inds
@@ -1065,8 +1071,8 @@ class YOLOX(nn.Module):
         if head is None:
             head = YOLOXHead(num_classes=4)
 
-        self.backbone = backbone
-        self.head = head(num_classes=4)
+        self.backbone = YOLOPAFPN()
+        self.head = YOLOXHead(num_classes=4)
 
     def forward(self, x, targets=None):
         fpn_outs = self.backbone(x)
@@ -1091,8 +1097,19 @@ class YOLOX(nn.Module):
 
 
 """
+数据加载部分：
+解析器(完成数据解析的任务)、迭代器(完成每次训练取得n张图片)的复现
+"""
+
+"""
+数据增强部分：
+mix_up,mosaic
+"""
+
+"""
 用于测试：
 """
+
 if __name__ == "__main__":
     from cv2 import cv2
     import numpy as np
